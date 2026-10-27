@@ -1,0 +1,6 @@
+{
+  "name": "KNOCKOUT ARENA",
+  "description": "Fast-paced futuristic cross-platform neon arena combat game with grappling hooks, knockback physics, bumpers, hazards, and 6-player matches.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
