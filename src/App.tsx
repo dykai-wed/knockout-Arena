@@ -20,6 +20,7 @@ import { SettingsModal } from './components/SettingsModal.tsx';
 import { TopHUD } from './components/TopHUD.tsx';
 import { BottomHUD } from './components/BottomHUD.tsx';
 import { TouchControls } from './components/TouchControls.tsx';
+import { TutorialOverlay } from './components/TutorialOverlay.tsx';
 import { PauseModal } from './components/PauseModal.tsx';
 import { GameOverModal } from './components/GameOverModal.tsx';
 
@@ -37,6 +38,7 @@ export default function App() {
   // Modals & Settings
   const [isHowToPlayOpen, setIsHowToPlayOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isEditLayoutMode, setIsEditLayoutMode] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [touchSettings, setTouchSettings] = useState<TouchControlSettings>(() => inputManager.getSettings());
   const [isMobileDevice, setIsMobileDevice] = useState(false);
@@ -50,15 +52,22 @@ export default function App() {
     document.body.dataset.state = appView;
   }, [appView]);
 
-  // Check mobile device & URL ?room=CODE on boot
+  // Check mobile device & URL ?room=CODE on boot and on resize
   useEffect(() => {
-    const hasTouch = typeof window !== 'undefined' && (
-      'ontouchstart' in window ||
-      navigator.maxTouchPoints > 0 ||
-      window.matchMedia('(pointer: coarse)').matches ||
-      /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)
-    );
-    setIsMobileDevice(hasTouch);
+    const updateDeviceMode = () => {
+      const hasTouch = typeof window !== 'undefined' && (
+        'ontouchstart' in window ||
+        navigator.maxTouchPoints > 0 ||
+        window.matchMedia('(pointer: coarse)').matches ||
+        window.innerWidth <= 960 ||
+        /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)
+      );
+      setIsMobileDevice(hasTouch);
+      inputManager.setIsMobile(hasTouch);
+    };
+
+    updateDeviceMode();
+    window.addEventListener('resize', updateDeviceMode);
 
     // Check ?room=CODE in URL query params
     const params = new URLSearchParams(window.location.search);
@@ -67,6 +76,8 @@ export default function App() {
       setInitialRoomCode(roomParam.trim().toUpperCase());
       setAppView('join_room');
     }
+
+    return () => window.removeEventListener('resize', updateDeviceMode);
   }, []);
 
   // Subscribe to multiplayer client room events
@@ -200,12 +211,20 @@ export default function App() {
     gameManager.setTitleMode();
   };
 
+  const handleStartTutorial = () => {
+    soundEngine.ensureContext();
+    setAppView('playing');
+    gameManager.setPaused(false);
+    gameManager.startTutorial();
+  };
+
   const resumeGame = () => {
     setAppView('playing');
     gameManager.setPaused(false);
   };
 
   const pauseGame = () => {
+    inputManager.exitPointerLock();
     setAppView('paused');
     gameManager.setPaused(true);
   };
@@ -213,7 +232,9 @@ export default function App() {
   const restartGame = () => {
     setAppView('playing');
     gameManager.setPaused(false);
-    if (currentSoloConfig) {
+    if (simState?.isTutorialMode) {
+      gameManager.restartTutorial();
+    } else if (currentSoloConfig) {
       gameManager.startSoloMatch(currentSoloConfig);
     } else {
       gameManager.restart();
@@ -221,6 +242,7 @@ export default function App() {
   };
 
   const returnToMainMenu = () => {
+    inputManager.exitPointerLock();
     if (activeRoom) {
       multiplayerClient.leaveRoom();
       setActiveRoom(null);
@@ -257,12 +279,20 @@ export default function App() {
         </div>
       )}
 
+      {/* Action Message / Warning Feedback Banner (e.g. low stamina, ability recharging) */}
+      {simState?.actionMessage && (appView === 'playing' || appView === 'paused') && (
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-40 px-4 py-1.5 bg-slate-950/90 border border-amber-400/80 rounded-full text-amber-300 text-xs font-cyber tracking-wider shadow-[0_0_20px_rgba(245,158,11,0.4)] animate-pulse flex items-center gap-2 pointer-events-none">
+          <span className="text-amber-400">⚡</span> {simState.actionMessage}
+        </div>
+      )}
+
       {/* 2. MAIN MENU (Default state on initial load - NO auto-play) */}
-      {appView === 'menu' && (
+      {appView === 'menu' && !isEditLayoutMode && (
         <MainMenu
           onSelectSolo={() => setAppView('solo_setup')}
           onSelectFriends={() => setAppView('join_room')}
           onSelectQuickMatch={handleQuickMatch}
+          onStartTutorial={handleStartTutorial}
           onOpenHowToPlay={() => setIsHowToPlayOpen(true)}
           onOpenSettings={() => setIsSettingsOpen(true)}
         />
@@ -310,11 +340,48 @@ export default function App() {
             onToggleMute={handleToggleMute}
           />
 
-          {youPlayer && <BottomHUD player={youPlayer} isMobile={isMobileDevice} />}
+          {youPlayer && (
+            <BottomHUD
+              player={youPlayer}
+              isMobile={isMobileDevice}
+              interactPrompt={simState.interactPrompt}
+              keybindings={touchSettings.keybindings}
+              tacticalCooldown={simState.humanTacticalCooldown || 0}
+            />
+          )}
 
-          {/* Virtual Touch Controls on Mobile Devices */}
-          <TouchControls settings={touchSettings} visible={isMobileDevice} />
+          {/* Interactive Tutorial Guided Overlay */}
+          {simState.isTutorialMode && simState.tutorialStep && (
+            <TutorialOverlay
+              currentStep={simState.tutorialStep}
+              isMobile={isMobileDevice}
+              stepProgress={simState.tutorialProgress || 0}
+              keybindings={touchSettings.keybindings}
+              onNextStep={() => gameManager.skipTutorialStep()}
+              onSkipTutorial={returnToMainMenu}
+              onRestartTutorial={() => gameManager.restartTutorial()}
+            />
+          )}
+
         </>
+      )}
+
+      {/* Virtual Touch Controls on Mobile Devices / Edit Mode */}
+      {(appView === 'playing' || appView === 'paused' || isEditLayoutMode) && (
+        <TouchControls
+          settings={touchSettings}
+          visible={isMobileDevice || isEditLayoutMode}
+          interactNearby={Boolean(simState?.interactPrompt)}
+          interactLabel={simState?.interactPrompt?.label || 'COLLECT'}
+          tacticalCooldown={simState?.humanTacticalCooldown || 0}
+          characterArchetype={currentSoloConfig?.character || 'tracer'}
+          isEditLayoutMode={isEditLayoutMode}
+          onSaveLayout={(layout) => {
+            handleUpdateSettings({ customPositions: layout });
+            setIsEditLayoutMode(false);
+          }}
+          onCloseEditLayout={() => setIsEditLayoutMode(false)}
+        />
       )}
 
       {/* Mobile Landscape Orientation Hint */}
@@ -359,6 +426,10 @@ export default function App() {
         <SettingsModal
           settings={touchSettings}
           onUpdateSettings={handleUpdateSettings}
+          onOpenEditLayout={() => {
+            setIsSettingsOpen(false);
+            setIsEditLayoutMode(true);
+          }}
           onClose={() => setIsSettingsOpen(false)}
         />
       )}

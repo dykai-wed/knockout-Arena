@@ -6,6 +6,7 @@ interface MainMenuProps {
   onSelectSolo: () => void;
   onSelectFriends: () => void;
   onSelectQuickMatch: () => void;
+  onStartTutorial: () => void;
   onOpenHowToPlay: () => void;
   onOpenSettings: () => void;
 }
@@ -14,6 +15,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onSelectSolo,
   onSelectFriends,
   onSelectQuickMatch,
+  onStartTutorial,
   onOpenHowToPlay,
   onOpenSettings,
 }) => {
@@ -41,18 +43,24 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 
         {/* Center Tabs */}
         <nav className="hidden md:flex items-center gap-1 bg-slate-950/80 p-1 rounded-lg border border-slate-800 font-cyber text-xs">
-          <button className="px-5 py-1.5 rounded bg-cyan-500 text-black font-bold shadow-[0_0_10px_rgba(0,240,255,0.5)]">
+          <button className="px-4 py-1.5 rounded bg-cyan-500 text-black font-bold shadow-[0_0_10px_rgba(0,240,255,0.5)]">
             PLAY
           </button>
           <button
+            onClick={onStartTutorial}
+            className="px-4 py-1.5 rounded text-amber-300 hover:text-amber-200 hover:bg-amber-500/10 border border-transparent hover:border-amber-500/30 transition-colors"
+          >
+            TUTORIAL
+          </button>
+          <button
             onClick={onOpenHowToPlay}
-            className="px-5 py-1.5 rounded text-slate-400 hover:text-white transition-colors"
+            className="px-4 py-1.5 rounded text-slate-400 hover:text-white transition-colors"
           >
             HOW TO PLAY
           </button>
           <button
             onClick={onOpenSettings}
-            className="px-5 py-1.5 rounded text-slate-400 hover:text-white transition-colors"
+            className="px-4 py-1.5 rounded text-slate-400 hover:text-white transition-colors"
           >
             SETTINGS
           </button>
@@ -151,8 +159,24 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           </div>
         </div>
 
-        {/* Secondary Utility Row (Matching image Screen 1 bottom) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-6">
+        {/* Secondary Utility Row */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
+          <button
+            onClick={() => {
+              soundEngine.playKnockbackHit(false);
+              onStartTutorial();
+            }}
+            className="cyber-panel p-3.5 rounded flex items-center gap-3 border-amber-500/30 hover:border-amber-400 bg-amber-950/20 transition-all cursor-pointer text-left group"
+          >
+            <div className="w-9 h-9 rounded bg-amber-950/80 border border-amber-500/60 flex items-center justify-center text-amber-300 group-hover:scale-110 transition-transform">
+              <Swords size={18} />
+            </div>
+            <div>
+              <div className="text-xs font-cyber font-bold text-amber-300">PRACTICE TUTORIAL</div>
+              <div className="text-[11px] font-mono text-slate-400">8 guided steps to master movement, grapple, & dash.</div>
+            </div>
+          </button>
+
           <button
             onClick={onOpenHowToPlay}
             className="cyber-panel p-3.5 rounded flex items-center gap-3 border-slate-800 hover:border-cyan-500/50 transition-all cursor-pointer text-left"
@@ -174,8 +198,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               <Settings size={18} />
             </div>
             <div>
-              <div className="text-xs font-cyber font-bold text-slate-200">SETTINGS</div>
-              <div className="text-[11px] font-mono text-slate-400">Adjust touch controls, audio synthesis, and haptics.</div>
+              <div className="text-xs font-cyber font-bold text-slate-200">SETTINGS & CONTROLS</div>
+              <div className="text-[11px] font-mono text-slate-400">Key remap, sensitivity, aim assist, & touch layout.</div>
             </div>
           </button>
         </div>

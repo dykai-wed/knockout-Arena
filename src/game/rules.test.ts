@@ -10,6 +10,8 @@ import {
   evaluateMatchStatus,
   formatMatchTimer,
   STAMINA_COSTS,
+  calculateAimAssist,
+  isTutorialStepComplete,
 } from './rules.ts';
 
 test('calculateKnockback applies correct impulse direction and magnitude', () => {
@@ -92,3 +94,77 @@ test('formatMatchTimer formats MM:SS correctly', () => {
   assert.equal(formatMatchTimer(5), '00:05');
   assert.equal(formatMatchTimer(0), '00:00');
 });
+
+test('calculateAimAssist nudges aim angle towards target in cone without overriding completely', () => {
+  const player = { x: 0, y: 0 };
+  const currentAim = { x: 1, y: 0 }; // Aiming right (0 rad)
+  const target = [{ id: 'dummy', x: 100, y: 25, isAlive: true, isValid: true }]; // ~14 degrees above
+
+  // When Off, aim remains strictly unchanged
+  const offAim = calculateAimAssist(player, currentAim, target, 'off');
+  assert.equal(offAim.x, 1);
+  assert.equal(offAim.y, 0);
+
+  // When Low, slight nudge towards positive y
+  const lowAim = calculateAimAssist(player, currentAim, target, 'low');
+  assert.ok(lowAim.y > 0, 'Low aim assist should nudge y upward');
+  assert.ok(lowAim.y < 0.25, 'Low aim assist should not snap 100%');
+
+  // When Standard, stronger nudge
+  const standardAim = calculateAimAssist(player, currentAim, target, 'standard');
+  assert.ok(standardAim.y > lowAim.y, 'Standard aim assist should nudge more than low');
+
+  // Dead or out-of-range targets ignored
+  const deadTarget = [{ id: 'dead', x: 100, y: 25, isAlive: false, isValid: true }];
+  const ignoredAim = calculateAimAssist(player, currentAim, deadTarget, 'standard');
+  assert.equal(ignoredAim.x, 1);
+  assert.equal(ignoredAim.y, 0);
+});
+
+test('isTutorialStepComplete accurately evaluates requirements for each step', () => {
+  assert.equal(
+    isTutorialStepComplete({
+      step: 1,
+      distanceMoved: 150,
+      dummyAttacked: false,
+      dummyKnockedBack: false,
+      grappleUsed: false,
+      dashUsed: false,
+      tacticalUsed: false,
+      hazardAvoided: false,
+      survivalSeconds: 0,
+    }),
+    true
+  );
+
+  assert.equal(
+    isTutorialStepComplete({
+      step: 1,
+      distanceMoved: 50,
+      dummyAttacked: false,
+      dummyKnockedBack: false,
+      grappleUsed: false,
+      dashUsed: false,
+      tacticalUsed: false,
+      hazardAvoided: false,
+      survivalSeconds: 0,
+    }),
+    false
+  );
+
+  assert.equal(
+    isTutorialStepComplete({
+      step: 4,
+      distanceMoved: 200,
+      dummyAttacked: true,
+      dummyKnockedBack: true,
+      grappleUsed: true,
+      dashUsed: false,
+      tacticalUsed: false,
+      hazardAvoided: false,
+      survivalSeconds: 0,
+    }),
+    true
+  );
+});
+

@@ -11,6 +11,10 @@ import {
   applyDamage,
   handlePlayerFall,
   PlayerStats,
+  calculateAimAssist,
+  isTutorialStepComplete,
+  TutorialStepId,
+  TutorialProgress,
 } from './rules.ts';
 import {
   SoloMatchConfig,
@@ -121,6 +125,15 @@ export interface GameStateUpdate {
   winner: PlayerStats | null;
   suddenDeath: boolean;
   cameraShakeTrauma: number;
+  interactPrompt?: {
+    label: string;
+    targetName: string;
+  } | null;
+  isTutorialMode?: boolean;
+  tutorialStep?: TutorialStepId;
+  tutorialProgress?: number;
+  humanTacticalCooldown?: number;
+  actionMessage?: string | null;
 }
 
 export class ArenaScene extends Phaser.Scene {
@@ -179,6 +192,25 @@ export class ArenaScene extends Phaser.Scene {
   private electricBarrierTimer = 6;
   private launchPadPos = { x: 300, y: 240, angle: -Math.PI * 0.75 };
 
+  // Tutorial & Feedback state
+  private isTutorialMode: boolean = false;
+  private tutorialStep: TutorialStepId = 1;
+  private tutorialProgressData: TutorialProgress = {
+    step: 1,
+    distanceMoved: 0,
+    dummyAttacked: false,
+    dummyKnockedBack: false,
+    grappleUsed: false,
+    dashUsed: false,
+    tacticalUsed: false,
+    hazardAvoided: false,
+    survivalSeconds: 0,
+  };
+  private prevHumanPos?: { x: number; y: number };
+  private actionFeedbackMessage: string | null = null;
+  private actionFeedbackTimer: number = 0;
+  private interactPrompt: { label: string; targetName: string } | null = null;
+
   // Callbacks to React
   private onStateUpdate?: (state: GameStateUpdate) => void;
   private lastStateEmitTime: number = 0;
@@ -208,14 +240,27 @@ export class ArenaScene extends Phaser.Scene {
     this.spawnPowerup('overdrive', 0, 180);
     this.spawnPowerup('speed', -160, -160);
 
-    // Click to attack on desktop
+    // Desktop mouse controls: LMB to attack, RMB to grapple
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (!inputManager.getIsMobile() && this.matchPhase === 'fighting' && this.game.canvas) {
+        inputManager.requestPointerLock(this.game.canvas);
+      }
+
       if (pointer.leftButtonDown()) {
         inputManager.setTouchAction('knockback', true);
       }
+      if (pointer.rightButtonDown()) {
+        inputManager.setTouchAction('grapple', true);
+      }
     });
-    this.input.on('pointerup', () => {
-      inputManager.setTouchAction('knockback', false);
+
+    this.input.on('pointerup', (pointer: Phaser.Input.Pointer) => {
+      if (!pointer.leftButtonDown()) {
+        inputManager.setTouchAction('knockback', false);
+      }
+      if (!pointer.rightButtonDown()) {
+        inputManager.setTouchAction('grapple', false);
+      }
     });
 
     // Window resize handler
@@ -851,6 +896,47 @@ export class ArenaScene extends Phaser.Scene {
     // Check Match Win/Loss conditions
     this.checkMatchConditions();
 
+    // Action feedback timer decay
+    if (this.actionFeedbackTimer > 0) {
+      this.actionFeedbackTimer -= dt;
+      if (this.actionFeedbackTimer <= 0) {
+        this.actionFeedbackMessage = null;
+      }
+    }
+
+    // Contextual interaction proximity detection (Power-ups / Interactive items)
+    const humanCombatant = this.players.find((p) => p.isHuman && p.stats.isAlive && !p.isFalling);
+    if (humanCombatant) {
+      const nearbyPw = this.powerups.find((pw) => Math.hypot(humanCombatant.x - pw.x, humanCombatant.y - pw.y) < 95);
+      if (nearbyPw) {
+        this.interactPrompt = {
+          label: `COLLECT ${nearbyPw.type.toUpperCase()}`,
+          targetName: nearbyPw.type,
+        };
+      } else {
+        this.interactPrompt = null;
+      }
+
+      // Tutorial: Hazard proximity & survival tracking
+      if (this.isTutorialMode) {
+        if (this.tutorialStep === 7) {
+          const distToGravity = Math.hypot(humanCombatant.x - this.gravityWellPos.x, humanCombatant.y - this.gravityWellPos.y);
+          const distToLaunch = Math.hypot(humanCombatant.x - this.launchPadPos.x, humanCombatant.y - this.launchPadPos.y);
+          if (distToGravity < 180 || distToLaunch < 90) {
+            this.tutorialProgressData.hazardAvoided = true;
+            this.advanceTutorialStep(8);
+          }
+        } else if (this.tutorialStep === 8) {
+          this.tutorialProgressData.survivalSeconds += dt;
+          if (this.tutorialProgressData.survivalSeconds >= 8) {
+            this.showActionFeedback('TUTORIAL COMPLETE! You are ready to battle.');
+          }
+        }
+      }
+    } else {
+      this.interactPrompt = null;
+    }
+
     // Send state to React HUD every 50ms
     if (time - this.lastStateEmitTime > 50) {
       this.lastStateEmitTime = time;
@@ -860,6 +946,18 @@ export class ArenaScene extends Phaser.Scene {
 
   private handleHumanCombatant(player: Combatant, input: ReturnType<typeof inputManager.getState>, dt: number) {
     const baseSpeed = player.stats.activePowerup?.type === 'speed' ? 360 : player.stats.activePowerup?.type === 'overdrive' ? 330 : 250;
+
+    // Track movement for tutorial (Step 1)
+    if (this.isTutorialMode && this.tutorialStep === 1) {
+      if (this.prevHumanPos) {
+        const stepDist = Math.hypot(player.x - this.prevHumanPos.x, player.y - this.prevHumanPos.y);
+        this.tutorialProgressData.distanceMoved += stepDist;
+        if (isTutorialStepComplete(this.tutorialProgressData)) {
+          this.advanceTutorialStep(2);
+        }
+      }
+      this.prevHumanPos = { x: player.x, y: player.y };
+    }
 
     // Dash execution
     if (player.dashTimer > 0) {
@@ -878,31 +976,52 @@ export class ArenaScene extends Phaser.Scene {
         player.vy = Phaser.Math.Linear(player.vy, input.move.y * baseSpeed, accel * dt / 250);
       }
 
-      // Aiming
+      // Aiming with configurable Aim Assist
       if (input.aim.x !== 0 || input.aim.y !== 0) {
-        player.angle = Math.atan2(input.aim.y, input.aim.x);
-        player.aimX = input.aim.x;
-        player.aimY = input.aim.y;
+        const rawDir = { x: input.aim.x, y: input.aim.y };
+        const aimAssistSetting = inputManager.getSettings().aimAssist;
+        let finalDir = rawDir;
+        if (aimAssistSetting !== 'off') {
+          const targets = this.players
+            .filter((p) => p.id !== player.id && p.stats.isAlive && !p.isFalling)
+            .map((p) => ({ id: p.id, x: p.x, y: p.y, isAlive: true, isValid: true }));
+          this.bumpers.forEach((b, idx) => targets.push({ id: `bumper_${idx}`, x: b.x, y: b.y, isAlive: true, isValid: true }));
+          finalDir = calculateAimAssist({ x: player.x, y: player.y }, rawDir, targets, aimAssistSetting);
+        }
+
+        const aimRad = Math.atan2(finalDir.y, finalDir.x);
+        player.angle = aimRad;
+        player.aimX = finalDir.x;
+        player.aimY = finalDir.y;
       }
     }
 
     // Action: Dash (Shift / Button)
-    if (input.justDash && player.dashTimer <= 0) {
-      const remainingStamina = consumeStamina(player.stats.stamina, STAMINA_COSTS.dash);
-      if (remainingStamina !== null) {
-        player.stats.stamina = remainingStamina;
-        const dashDirX = input.move.x !== 0 || input.move.y !== 0 ? input.move.x : Math.cos(player.angle);
-        const dashDirY = input.move.x !== 0 || input.move.y !== 0 ? input.move.y : Math.sin(player.angle);
-        const dashSpeed = 640;
-        player.dashTimer = player.dashDuration;
-        player.dashVx = dashDirX * dashSpeed;
-        player.dashVy = dashDirY * dashSpeed;
-        player.invulnerableTimer = 0.18;
-        soundEngine.playDash();
+    if (input.justDash) {
+      if (player.dashTimer <= 0) {
+        const remainingStamina = consumeStamina(player.stats.stamina, STAMINA_COSTS.dash);
+        if (remainingStamina !== null) {
+          player.stats.stamina = remainingStamina;
+          const dashDirX = input.move.x !== 0 || input.move.y !== 0 ? input.move.x : Math.cos(player.angle);
+          const dashDirY = input.move.x !== 0 || input.move.y !== 0 ? input.move.y : Math.sin(player.angle);
+          const dashSpeed = 640;
+          player.dashTimer = player.dashDuration;
+          player.dashVx = dashDirX * dashSpeed;
+          player.dashVy = dashDirY * dashSpeed;
+          player.invulnerableTimer = 0.18;
+          soundEngine.playDash();
+
+          if (this.isTutorialMode && this.tutorialStep === 5) {
+            this.tutorialProgressData.dashUsed = true;
+            this.advanceTutorialStep(6);
+          }
+        } else {
+          this.showActionFeedback(`Low Stamina! Dash requires ${STAMINA_COSTS.dash}`);
+        }
       }
     }
 
-    // Action: Grapple (Space / Button)
+    // Action: Grapple (Space / RMB / Button)
     if (input.justGrapple) {
       if (player.grappleState?.active) {
         // Release grapple
@@ -910,22 +1029,66 @@ export class ArenaScene extends Phaser.Scene {
       } else {
         const remainingStamina = consumeStamina(player.stats.stamina, STAMINA_COSTS.grapple);
         if (remainingStamina !== null) {
+          player.stats.stamina = remainingStamina;
           this.executeGrapple(player);
+
+          if (this.isTutorialMode && this.tutorialStep === 4) {
+            this.tutorialProgressData.grappleUsed = true;
+            this.advanceTutorialStep(5);
+          }
+        } else {
+          this.showActionFeedback(`Low Stamina! Grapple requires ${STAMINA_COSTS.grapple}`);
         }
       }
     }
 
     // Action: Knockback Attack (LMB / Button)
-    if (input.justKnockback && player.attackCooldown <= 0) {
-      this.executeKnockbackAttack(player);
+    if (input.justKnockback) {
+      if (player.attackCooldown <= 0) {
+        this.executeKnockbackAttack(player);
+      } else {
+        this.showActionFeedback('Attack is recharging');
+      }
     }
 
     // Action: Tactical Ability (E / Button)
-    if (input.justTactical && player.tacticalCooldown <= 0) {
-      const remainingStamina = consumeStamina(player.stats.stamina, STAMINA_COSTS.tactical);
-      if (remainingStamina !== null) {
-        player.stats.stamina = remainingStamina;
-        this.executeTacticalAbility(player);
+    if (input.justTactical) {
+      if (player.tacticalCooldown <= 0) {
+        const remainingStamina = consumeStamina(player.stats.stamina, STAMINA_COSTS.tactical);
+        if (remainingStamina !== null) {
+          player.stats.stamina = remainingStamina;
+          this.executeTacticalAbility(player);
+
+          if (this.isTutorialMode && this.tutorialStep === 6) {
+            this.tutorialProgressData.tacticalUsed = true;
+            this.advanceTutorialStep(7);
+          }
+        } else {
+          this.showActionFeedback(`Low Stamina! Ability requires ${STAMINA_COSTS.tactical}`);
+        }
+      } else {
+        this.showActionFeedback(`Ability recharging (${player.tacticalCooldown.toFixed(1)}s)`);
+      }
+    }
+
+    // Action: Contextual Interact (F key / mobile button)
+    if (input.justInteract && this.interactPrompt) {
+      const nearPw = this.powerups.find((pw) => Math.hypot(player.x - pw.x, player.y - pw.y) < 100);
+      if (nearPw) {
+        player.stats.activePowerup = {
+          type: nearPw.type,
+          duration: 12,
+          maxDuration: 12,
+        };
+        if (nearPw.type === 'shield') {
+          player.stats.shield = 50;
+        }
+        soundEngine.playPowerup();
+        this.createImpactParticles(nearPw.x, nearPw.y, 0x00f0ff);
+        nearPw.container.destroy();
+        const idx = this.powerups.indexOf(nearPw);
+        if (idx !== -1) this.powerups.splice(idx, 1);
+        this.showActionFeedback(`COLLECTED ${nearPw.type.toUpperCase()}!`);
       }
     }
 
@@ -1128,6 +1291,16 @@ export class ArenaScene extends Phaser.Scene {
           if (attacker.isHuman) {
             this.cameras.main.shake(120, 0.008);
             this.hitstopTimer = 0.04; // 40ms simulation hitstop
+
+            if (this.isTutorialMode) {
+              if (this.tutorialStep === 2) {
+                this.tutorialProgressData.dummyAttacked = true;
+                this.advanceTutorialStep(3);
+              } else if (this.tutorialStep === 3) {
+                this.tutorialProgressData.dummyKnockedBack = true;
+                this.advanceTutorialStep(4);
+              }
+            }
           }
         }
       }
@@ -1748,6 +1921,40 @@ export class ArenaScene extends Phaser.Scene {
 
     const alive = this.players.filter((p) => p.stats.isAlive && p.stats.lives > 0);
     const winner = this.isGameOver ? (alive.length === 1 ? alive[0].stats : this.players[0].stats) : null;
+    const human = this.players.find((p) => p.isHuman);
+
+    let stepProgressPct = 0;
+    if (this.isTutorialMode) {
+      switch (this.tutorialStep) {
+        case 1:
+          stepProgressPct = Math.min(1, this.tutorialProgressData.distanceMoved / 120);
+          break;
+        case 2:
+          stepProgressPct = this.tutorialProgressData.dummyAttacked ? 1 : 0;
+          break;
+        case 3:
+          stepProgressPct = this.tutorialProgressData.dummyKnockedBack ? 1 : 0;
+          break;
+        case 4:
+          stepProgressPct = this.tutorialProgressData.grappleUsed ? 1 : 0;
+          break;
+        case 5:
+          stepProgressPct = this.tutorialProgressData.dashUsed ? 1 : 0;
+          break;
+        case 6:
+          stepProgressPct = this.tutorialProgressData.tacticalUsed ? 1 : 0;
+          break;
+        case 7:
+          stepProgressPct = this.tutorialProgressData.hazardAvoided ? 1 : 0;
+          break;
+        case 8:
+          stepProgressPct = Math.min(1, this.tutorialProgressData.survivalSeconds / 8);
+          break;
+        default:
+          stepProgressPct = 1;
+          break;
+      }
+    }
 
     this.onStateUpdate({
       players: this.players.map((p) => ({
@@ -1765,6 +1972,12 @@ export class ArenaScene extends Phaser.Scene {
       winner,
       suddenDeath: this.suddenDeathActive,
       cameraShakeTrauma: 0,
+      interactPrompt: this.interactPrompt,
+      isTutorialMode: this.isTutorialMode,
+      tutorialStep: this.tutorialStep,
+      tutorialProgress: stepProgressPct,
+      humanTacticalCooldown: human ? human.tacticalCooldown : 0,
+      actionMessage: this.actionFeedbackMessage,
     });
   }
 
@@ -2072,5 +2285,115 @@ export class ArenaScene extends Phaser.Scene {
 
   public setPaused(paused: boolean) {
     this.isPaused = paused;
+  }
+
+  public getHumanPosition(): { x: number; y: number } | null {
+    const human = this.players.find((p) => p.isHuman);
+    return human ? { x: human.x, y: human.y } : null;
+  }
+
+  public startTutorial() {
+    this.isTutorialMode = true;
+    this.tutorialStep = 1;
+    this.tutorialProgressData = {
+      step: 1,
+      distanceMoved: 0,
+      dummyAttacked: false,
+      dummyKnockedBack: false,
+      grappleUsed: false,
+      dashUsed: false,
+      tacticalUsed: false,
+      hazardAvoided: false,
+      survivalSeconds: 0,
+    };
+    this.matchPhase = 'fighting';
+    this.matchTimeRemaining = 300;
+    this.isGameOver = false;
+    this.isPaused = false;
+    this.prevHumanPos = undefined;
+    if (this.countdownBannerContainer) {
+      this.countdownBannerContainer.setVisible(false);
+    }
+
+    // Configure Human as Tracer
+    const human = this.players[0];
+    if (human) {
+      human.isHuman = true;
+      human.x = 0;
+      human.y = 80;
+      human.vx = 0;
+      human.vy = 0;
+      human.stats.health = 100;
+      human.stats.shield = 50;
+      human.stats.stamina = 100;
+      human.stats.lives = 3;
+      human.stats.isAlive = true;
+      human.container.setVisible(true);
+      human.container.setPosition(0, 80);
+      human.grappleState = null;
+      human.dashTimer = 0;
+      human.attackCooldown = 0;
+      human.tacticalCooldown = 0;
+    }
+
+    // Configure Bot 1 as a stationary Training Dummy
+    const dummy = this.players[1];
+    if (dummy) {
+      dummy.isHuman = false;
+      dummy.name = 'TRAINING DUMMY';
+      dummy.stats.name = 'TRAINING DUMMY';
+      dummy.stats.personality = 'survivor';
+      dummy.x = 0;
+      dummy.y = -80;
+      dummy.vx = 0;
+      dummy.vy = 0;
+      dummy.stats.health = 100;
+      dummy.stats.shield = 50;
+      dummy.stats.stamina = 100;
+      dummy.stats.lives = 99;
+      dummy.stats.isAlive = true;
+      dummy.container.setVisible(true);
+      dummy.container.setPosition(0, -80);
+      dummy.overheadName.setText('TRAINING DUMMY');
+    }
+
+    // Deactivate remaining bots
+    for (let i = 2; i < this.players.length; i++) {
+      this.players[i].stats.isAlive = false;
+      this.players[i].stats.lives = 0;
+      this.players[i].container.setVisible(false);
+    }
+
+    this.showActionFeedback('TUTORIAL STARTED: Practice arena combat!');
+    this.emitStateToReact();
+  }
+
+  public skipTutorialStep() {
+    if (this.tutorialStep < 8) {
+      this.advanceTutorialStep((this.tutorialStep + 1) as TutorialStepId);
+    } else {
+      this.showActionFeedback('TUTORIAL COMPLETE!');
+    }
+  }
+
+  public restartTutorial() {
+    this.startTutorial();
+  }
+
+  private advanceTutorialStep(nextStep: TutorialStepId) {
+    this.tutorialStep = nextStep;
+    this.tutorialProgressData.step = nextStep;
+    soundEngine.playPowerup();
+    if (nextStep >= 8 && this.tutorialProgressData.survivalSeconds >= 8) {
+      soundEngine.playVictory();
+      this.showActionFeedback('TUTORIAL COMPLETE! You are ready to battle.');
+    } else {
+      this.showActionFeedback(`STEP ${nextStep} OF 8`);
+    }
+  }
+
+  private showActionFeedback(message: string) {
+    this.actionFeedbackMessage = message;
+    this.actionFeedbackTimer = 1.8;
   }
 }

@@ -226,3 +226,117 @@ export function formatMatchTimer(seconds: number): string {
   const s = clamped % 60;
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
+
+export type AimAssistLevel = 'off' | 'low' | 'standard';
+
+export interface AimAssistTarget {
+  id: string;
+  x: number;
+  y: number;
+  isAlive: boolean;
+  isValid: boolean;
+}
+
+/**
+ * Calculates subtle nudge towards nearest valid target in the player's aiming cone.
+ * Never auto-attacks. Never targets through walls or invalid targets.
+ */
+export function calculateAimAssist(
+  playerPos: Vector2D,
+  currentAimDir: Vector2D,
+  targets: AimAssistTarget[],
+  level: AimAssistLevel,
+  effectiveRange: number = 280,
+  maxConeAngleRad: number = Math.PI / 4 // 45 degrees
+): Vector2D {
+  if (level === 'off' || targets.length === 0) {
+    return currentAimDir;
+  }
+
+  const currentLen = Math.hypot(currentAimDir.x, currentAimDir.y);
+  if (currentLen < 0.001) return currentAimDir;
+
+  const currentAngle = Math.atan2(currentAimDir.y, currentAimDir.x);
+  const nudgeFactor = level === 'low' ? 0.22 : 0.45; // Subtle nudge percentage
+
+  let bestTarget: AimAssistTarget | null = null;
+  let bestScore = -Infinity;
+  let bestAngle = currentAngle;
+
+  for (const t of targets) {
+    if (!t.isAlive || !t.isValid) continue;
+
+    const dx = t.x - playerPos.x;
+    const dy = t.y - playerPos.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < 10 || dist > effectiveRange) continue;
+
+    const targetAngle = Math.atan2(dy, dx);
+    let angleDiff = Math.abs(targetAngle - currentAngle);
+    if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+
+    if (angleDiff <= maxConeAngleRad) {
+      // Prioritize targets closer in distance and angle
+      const score = (1 - angleDiff / maxConeAngleRad) * 0.6 + (1 - dist / effectiveRange) * 0.4;
+      if (score > bestScore) {
+        bestScore = score;
+        bestTarget = t;
+        bestAngle = targetAngle;
+      }
+    }
+  }
+
+  if (!bestTarget) {
+    return currentAimDir;
+  }
+
+  // Smoothly blend angle towards best target
+  let angleDelta = bestAngle - currentAngle;
+  while (angleDelta > Math.PI) angleDelta -= 2 * Math.PI;
+  while (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
+
+  const blendedAngle = currentAngle + angleDelta * nudgeFactor;
+  return {
+    x: Math.cos(blendedAngle),
+    y: Math.sin(blendedAngle),
+  };
+}
+
+export type TutorialStepId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+export interface TutorialProgress {
+  step: TutorialStepId;
+  distanceMoved: number;
+  dummyAttacked: boolean;
+  dummyKnockedBack: boolean;
+  grappleUsed: boolean;
+  dashUsed: boolean;
+  tacticalUsed: boolean;
+  hazardAvoided: boolean;
+  survivalSeconds: number;
+}
+
+export function isTutorialStepComplete(progress: TutorialProgress): boolean {
+  switch (progress.step) {
+    case 1: // Move around the arena
+      return progress.distanceMoved >= 120;
+    case 2: // Attack a training dummy
+      return progress.dummyAttacked;
+    case 3: // Knock an opponent backward
+      return progress.dummyKnockedBack;
+    case 4: // Use the grapple
+      return progress.grappleUsed;
+    case 5: // Perform a dash
+      return progress.dashUsed;
+    case 6: // Activate a tactical ability
+      return progress.tacticalUsed;
+    case 7: // Avoid an arena hazard
+      return progress.hazardAvoided;
+    case 8: // Survive until tutorial ends
+      return progress.survivalSeconds >= 8;
+    default:
+      return false;
+  }
+}
+

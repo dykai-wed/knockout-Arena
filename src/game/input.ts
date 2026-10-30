@@ -1,7 +1,10 @@
 /**
  * KNOCKOUT ARENA - Unified Input Abstraction
- * Handles desktop keyboard & mouse as well as mobile multi-touch virtual controls.
+ * Handles desktop keyboard & mouse (with customizable bindings, mouse aim, pointer lock)
+ * as well as mobile multi-touch virtual controls (analog joystick, floating joystick, thumb cluster).
  */
+
+import { AimAssistLevel } from './rules.ts';
 
 export interface InputState {
   move: { x: number; y: number };
@@ -21,23 +24,67 @@ export interface InputState {
   justPause: boolean;
 }
 
-export interface TouchControlSettings {
+export interface KeyBindings {
+  moveUp: string;
+  moveDown: string;
+  moveLeft: string;
+  moveRight: string;
+  attack: string; // 'LMB' or key code
+  grapple: string; // 'RMB' or key code
+  dash: string; // 'ShiftLeft'
+  tactical: string; // 'KeyE'
+  interact: string; // 'KeyF'
+  pause: string; // 'Escape'
+}
+
+export const DEFAULT_KEYBINDINGS: KeyBindings = {
+  moveUp: 'KeyW',
+  moveDown: 'KeyS',
+  moveLeft: 'KeyA',
+  moveRight: 'KeyD',
+  attack: 'LMB',
+  grapple: 'RMB',
+  dash: 'ShiftLeft',
+  tactical: 'KeyE',
+  interact: 'KeyF',
+  pause: 'Escape',
+};
+
+export interface ControlSettings {
+  // Mobile
   joystickScale: number; // 0.8 - 1.4
   buttonScale: number; // 0.8 - 1.4
   opacity: number; // 0.3 - 1.0
-  aimAssist: boolean;
+  joystickType: 'fixed' | 'floating';
   vibration: boolean;
   leftHanded: boolean;
+  customPositions?: {
+    joystick?: { x: number; y: number };
+    buttons?: { x: number; y: number };
+  };
+  // Shared / Desktop
+  aimAssist: AimAssistLevel;
+  mouseSensitivity: number; // 0.5 - 2.5
+  reducedEffects: boolean;
+  keybindings: KeyBindings;
 }
 
-export const DEFAULT_TOUCH_SETTINGS: TouchControlSettings = {
+export type TouchControlSettings = ControlSettings;
+
+export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   joystickScale: 1.0,
   buttonScale: 1.0,
   opacity: 0.85,
-  aimAssist: true,
+  joystickType: 'fixed',
   vibration: true,
   leftHanded: false,
+  aimAssist: 'standard',
+  mouseSensitivity: 1.0,
+  reducedEffects: false,
+  keybindings: { ...DEFAULT_KEYBINDINGS },
 };
+
+export const DEFAULT_TOUCH_SETTINGS = DEFAULT_CONTROL_SETTINGS;
 
 class InputManager {
   private state: InputState = {
@@ -80,7 +127,7 @@ class InputManager {
   };
 
   private isMobileDevice: boolean = false;
-  private settings: TouchControlSettings = { ...DEFAULT_TOUCH_SETTINGS };
+  private settings: ControlSettings = { ...DEFAULT_CONTROL_SETTINGS };
 
   constructor() {
     this.detectDevice();
@@ -101,12 +148,23 @@ class InputManager {
     return this.isMobileDevice;
   }
 
-  public getSettings(): TouchControlSettings {
+  public setIsMobile(isMobile: boolean) {
+    this.isMobileDevice = isMobile;
+  }
+
+  public getSettings(): ControlSettings {
     return this.settings;
   }
 
-  public updateSettings(newSettings: Partial<TouchControlSettings>) {
-    this.settings = { ...this.settings, ...newSettings };
+  public updateSettings(newSettings: Partial<ControlSettings>) {
+    this.settings = {
+      ...this.settings,
+      ...newSettings,
+      keybindings: {
+        ...this.settings.keybindings,
+        ...(newSettings.keybindings || {}),
+      },
+    };
     try {
       localStorage.setItem('knockout_touch_settings', JSON.stringify(this.settings));
     } catch {
@@ -114,11 +172,29 @@ class InputManager {
     }
   }
 
+  public resetToDefaults() {
+    this.settings = JSON.parse(JSON.stringify(DEFAULT_CONTROL_SETTINGS));
+    try {
+      localStorage.setItem('knockout_touch_settings', JSON.stringify(this.settings));
+    } catch {
+      // Ignored
+    }
+    return this.settings;
+  }
+
   private loadSettings() {
     try {
       const saved = localStorage.getItem('knockout_touch_settings');
       if (saved) {
-        this.settings = { ...DEFAULT_TOUCH_SETTINGS, ...JSON.parse(saved) };
+        const parsed = JSON.parse(saved);
+        this.settings = {
+          ...DEFAULT_CONTROL_SETTINGS,
+          ...parsed,
+          keybindings: {
+            ...DEFAULT_KEYBINDINGS,
+            ...(parsed.keybindings || {}),
+          },
+        };
       }
     } catch {
       // Default
@@ -129,13 +205,17 @@ class InputManager {
     if (typeof window === 'undefined') return;
 
     window.addEventListener('keydown', (e) => {
-      // Prevent scrolling on Space / Arrow keys during game
+      const kb = this.settings.keybindings;
+
+      // Prevent page scrolling on Space / Arrow keys during game
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
         e.preventDefault();
       }
+
       this.keysHeld.add(e.code);
 
-      if (e.code === 'Escape' || e.code === 'KeyP') {
+      // Handle custom bound Pause key
+      if (e.code === kb.pause || e.code === 'Escape' || e.code === 'KeyP') {
         this.touchActions.pause = true;
       }
     });
@@ -144,7 +224,7 @@ class InputManager {
       this.keysHeld.delete(e.code);
     });
 
-    // Safety: Reset keys on window blur so inputs never stick
+    // Safety: Reset keys on window blur so inputs never get stuck
     window.addEventListener('blur', () => {
       this.clearAll();
     });
@@ -152,6 +232,14 @@ class InputManager {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         this.clearAll();
+      }
+    });
+
+    // Prevent context menu on right click globally during gameplay so RMB can be used for grapple
+    window.addEventListener('contextmenu', (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'CANVAS' || target.closest('[data-testid="game-canvas-container"]'))) {
+        e.preventDefault();
       }
     });
   }
@@ -168,6 +256,27 @@ class InputManager {
       interact: false,
       pause: false,
     };
+  }
+
+  // Pointer Lock API helpers for desktop capture
+  public requestPointerLock(element: HTMLElement) {
+    try {
+      if (element.requestPointerLock && document.pointerLockElement !== element) {
+        element.requestPointerLock();
+      }
+    } catch {
+      // Ignored if user interaction requirement isn't satisfied
+    }
+  }
+
+  public exitPointerLock() {
+    try {
+      if (document.exitPointerLock && document.pointerLockElement) {
+        document.exitPointerLock();
+      }
+    } catch {
+      // Ignored
+    }
   }
 
   // Called by touch overlay components
@@ -197,18 +306,24 @@ class InputManager {
     this.touchActions.knockback = pressed;
   }
 
+  public setMouseGrapple(pressed: boolean) {
+    this.touchActions.grapple = pressed;
+  }
+
   /**
    * Main per-frame input update loop. Consumes keyboard + touch and updates edge triggers.
    */
   public update() {
-    // 1. Calculate movement vector
+    const kb = this.settings.keybindings;
+
+    // 1. Calculate movement vector from customizable keys and arrow keys
     let mx = 0;
     let my = 0;
 
-    if (this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp')) my -= 1;
-    if (this.keysHeld.has('KeyS') || this.keysHeld.has('ArrowDown')) my += 1;
-    if (this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft')) mx -= 1;
-    if (this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight')) mx += 1;
+    if (this.keysHeld.has(kb.moveUp) || this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp')) my -= 1;
+    if (this.keysHeld.has(kb.moveDown) || this.keysHeld.has('KeyS') || this.keysHeld.has('ArrowDown')) my += 1;
+    if (this.keysHeld.has(kb.moveLeft) || this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft')) mx -= 1;
+    if (this.keysHeld.has(kb.moveRight) || this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight')) mx += 1;
 
     // Normalize diagonal keyboard movement
     const keyDist = Math.hypot(mx, my);
@@ -234,12 +349,33 @@ class InputManager {
       this.state.aim = { x: mx, y: my };
     }
 
-    // 2. Action states
-    const kbPressed = this.touchActions.knockback;
-    const dashPressed = this.keysHeld.has('ShiftLeft') || this.keysHeld.has('ShiftRight') || this.touchActions.dash;
-    const grapplePressed = this.keysHeld.has('Space') || this.touchActions.grapple;
-    const tacticalPressed = this.keysHeld.has('KeyE') || this.touchActions.tactical;
-    const interactPressed = this.keysHeld.has('KeyQ') || this.touchActions.interact;
+    // 2. Action states based on keys + mouse + touch
+    const kbPressed =
+      this.touchActions.knockback ||
+      (kb.attack !== 'LMB' && this.keysHeld.has(kb.attack));
+
+    const grapplePressed =
+      this.touchActions.grapple ||
+      (kb.grapple !== 'RMB' && this.keysHeld.has(kb.grapple)) ||
+      (kb.grapple === 'RMB' && this.keysHeld.has('Space')); // Space preserved as backup
+
+    const dashPressed =
+      this.touchActions.dash ||
+      this.keysHeld.has(kb.dash) ||
+      this.keysHeld.has('ShiftLeft') ||
+      this.keysHeld.has('ShiftRight');
+
+    const tacticalPressed =
+      this.touchActions.tactical ||
+      this.keysHeld.has(kb.tactical) ||
+      this.keysHeld.has('KeyE');
+
+    const interactPressed =
+      this.touchActions.interact ||
+      this.keysHeld.has(kb.interact) ||
+      this.keysHeld.has('KeyF') ||
+      this.keysHeld.has('KeyQ');
+
     const pausePressed = this.touchActions.pause;
 
     this.state.isKnockbackPressed = kbPressed;
